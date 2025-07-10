@@ -9,10 +9,14 @@ use crate::bors::CheckSuiteStatus;
 use crate::bors::RepositoryState;
 use crate::bors::comment::{try_build_succeeded_comment, workflow_failed_comment};
 use crate::bors::event::{CheckSuiteCompleted, WorkflowCompleted, WorkflowStarted};
+use crate::bors::handlers::TRY_BRANCH_NAME;
 use crate::bors::handlers::is_bors_observed_branch;
 use crate::bors::handlers::labels::handle_label_trigger;
 use crate::bors::merge_queue::AUTO_BRANCH_NAME;
 use crate::bors::merge_queue::MergeQueueSender;
+use crate::database::BuildModel;
+use crate::database::PullRequestModel;
+use crate::database::WorkflowModel;
 use crate::database::{BuildStatus, WorkflowStatus};
 use crate::github::LabelTrigger;
 
@@ -192,13 +196,32 @@ async fn try_complete_build(
         return Ok(());
     }
 
+    match payload.branch.as_str() {
+        TRY_BRANCH_NAME => {
+            complete_try_build(db, repo, pr, build, workflows, has_failure, payload).await?
+        }
+        AUTO_BRANCH_NAME => complete_auto_build(merge_queue_tx).await?,
+        _ => unreachable!("Branch should be bors observed branch"),
+    }
+
+    Ok(())
+}
+
+async fn complete_try_build(
+    db: &PgDbClient,
+    repo: &RepositoryState,
+    pr: PullRequestModel,
+    build: BuildModel,
+    workflows: Vec<WorkflowModel>,
+    has_failure: bool,
+    payload: CheckSuiteCompleted,
+) -> anyhow::Result<()> {
     let (status, trigger) = if has_failure {
         (BuildStatus::Failure, LabelTrigger::TryBuildFailed)
     } else {
         (BuildStatus::Success, LabelTrigger::TryBuildSucceeded)
     };
     db.update_build_status(&build, status).await?;
-
     handle_label_trigger(repo, pr.number, trigger).await?;
 
     if let Some(check_run_id) = build.check_run_id {
@@ -226,10 +249,11 @@ async fn try_complete_build(
     };
     repo.client.post_comment(pr.number, message).await?;
 
-    // Trigger merge queue when an auto build completes
-    if payload.branch == AUTO_BRANCH_NAME {
-        merge_queue_tx.trigger().await?;
-    }
+    Ok(())
+}
+
+async fn complete_auto_build(merge_queue_tx: &MergeQueueSender) -> anyhow::Result<()> {
+    merge_queue_tx.trigger().await?;
 
     Ok(())
 }
