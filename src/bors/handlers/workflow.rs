@@ -196,9 +196,18 @@ async fn try_complete_build(
         return Ok(());
     }
 
-    match payload.branch.as_str() {
+    let branch = payload.branch.as_str();
+
+    let status = if has_failure {
+        BuildStatus::Failure
+    } else {
+        BuildStatus::Success
+    };
+    db.update_build_status(&build, status).await?;
+
+    match branch {
         TRY_BRANCH_NAME => {
-            complete_try_build(db, repo, pr, build, workflows, has_failure, payload).await?
+            complete_try_build(repo, pr, build, workflows, has_failure, payload).await?
         }
         AUTO_BRANCH_NAME => complete_auto_build(merge_queue_tx).await?,
         _ => unreachable!("Branch should be bors observed branch"),
@@ -208,7 +217,6 @@ async fn try_complete_build(
 }
 
 async fn complete_try_build(
-    db: &PgDbClient,
     repo: &RepositoryState,
     pr: PullRequestModel,
     build: BuildModel,
@@ -216,12 +224,11 @@ async fn complete_try_build(
     has_failure: bool,
     payload: CheckSuiteCompleted,
 ) -> anyhow::Result<()> {
-    let (status, trigger) = if has_failure {
-        (BuildStatus::Failure, LabelTrigger::TryBuildFailed)
+    let trigger = if has_failure {
+        LabelTrigger::TryBuildFailed
     } else {
-        (BuildStatus::Success, LabelTrigger::TryBuildSucceeded)
+        LabelTrigger::TryBuildSucceeded
     };
-    db.update_build_status(&build, status).await?;
     handle_label_trigger(repo, pr.number, trigger).await?;
 
     if let Some(check_run_id) = build.check_run_id {
