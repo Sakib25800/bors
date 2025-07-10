@@ -180,6 +180,7 @@ async fn try_complete_build(
     let has_failure = checks
         .iter()
         .any(|check| matches!(check.status, CheckSuiteStatus::Failure));
+    let build_succeeded = !has_failure;
 
     let mut workflows = db.get_workflows_for_build(&build).await?;
     workflows.sort_by(|a, b| a.name.cmp(&b.name));
@@ -198,16 +199,19 @@ async fn try_complete_build(
 
     let branch = payload.branch.as_str();
 
-    let status = if has_failure {
-        BuildStatus::Failure
-    } else {
-        BuildStatus::Success
+    let (status, trigger) = match (branch, build_succeeded) {
+        (TRY_BRANCH_NAME, true) => (BuildStatus::Success, LabelTrigger::TryBuildSucceeded),
+        (TRY_BRANCH_NAME, false) => (BuildStatus::Failure, LabelTrigger::TryBuildFailed),
+        (AUTO_BRANCH_NAME, true) => (BuildStatus::Success, LabelTrigger::AutoBuildSucceeded),
+        (AUTO_BRANCH_NAME, false) => (BuildStatus::Failure, LabelTrigger::AutoBuildFailed),
+        _ => unreachable!("Branch should be bors observed branch"),
     };
     db.update_build_status(&build, status).await?;
+    handle_label_trigger(repo, pr.number, trigger).await?;
 
     match branch {
         TRY_BRANCH_NAME => {
-            complete_try_build(repo, pr, build, workflows, has_failure, payload).await?
+            complete_try_build(repo, pr, build, workflows, build_succeeded, payload).await?
         }
         AUTO_BRANCH_NAME => complete_auto_build(merge_queue_tx).await?,
         _ => unreachable!("Branch should be bors observed branch"),
@@ -221,21 +225,14 @@ async fn complete_try_build(
     pr: PullRequestModel,
     build: BuildModel,
     workflows: Vec<WorkflowModel>,
-    has_failure: bool,
+    build_succeeded: bool,
     payload: CheckSuiteCompleted,
 ) -> anyhow::Result<()> {
-    let trigger = if has_failure {
-        LabelTrigger::TryBuildFailed
-    } else {
-        LabelTrigger::TryBuildSucceeded
-    };
-    handle_label_trigger(repo, pr.number, trigger).await?;
-
     if let Some(check_run_id) = build.check_run_id {
-        let (status, conclusion) = if has_failure {
-            (CheckRunStatus::Completed, Some(CheckRunConclusion::Failure))
-        } else {
+        let (status, conclusion) = if build_succeeded {
             (CheckRunStatus::Completed, Some(CheckRunConclusion::Success))
+        } else {
+            (CheckRunStatus::Completed, Some(CheckRunConclusion::Failure))
         };
 
         if let Err(error) = repo
@@ -247,12 +244,12 @@ async fn complete_try_build(
         }
     }
 
-    let message = if !has_failure {
-        tracing::info!("Workflow succeeded");
-        try_build_succeeded_comment(&workflows, payload.commit_sha, &build)
-    } else {
+    let message = if build_succeeded {
         tracing::info!("Workflow failed");
         workflow_failed_comment(&workflows)
+    } else {
+        tracing::info!("Workflow succeeded");
+        try_build_succeeded_comment(&workflows, payload.commit_sha, &build)
     };
     repo.client.post_comment(pr.number, message).await?;
 
