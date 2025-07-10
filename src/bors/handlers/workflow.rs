@@ -197,22 +197,48 @@ async fn try_complete_build(
         return Ok(());
     }
 
-    let branch = payload.branch.as_str();
+    let pr_num = pr.number;
 
-    let (status, trigger) = match (branch, build_succeeded) {
-        (TRY_BRANCH_NAME, true) => (BuildStatus::Success, LabelTrigger::TryBuildSucceeded),
-        (TRY_BRANCH_NAME, false) => (BuildStatus::Failure, LabelTrigger::TryBuildFailed),
-        (AUTO_BRANCH_NAME, true) => (BuildStatus::Success, LabelTrigger::AutoBuildSucceeded),
-        (AUTO_BRANCH_NAME, false) => (BuildStatus::Failure, LabelTrigger::AutoBuildFailed),
+    if build_succeeded {
+        tracing::info!("Build succeeded for PR {pr_num}");
+    } else {
+        tracing::info!("Build failed for PR {pr_num}");
+    }
+
+    let branch = payload.branch.as_str();
+    let (status, trigger, comment_opt) = match (branch, build_succeeded) {
+        (TRY_BRANCH_NAME, true) => (
+            BuildStatus::Success,
+            LabelTrigger::TryBuildSucceeded,
+            Some(try_build_succeeded_comment(
+                &workflows,
+                payload.commit_sha.clone(),
+                &build,
+            )),
+        ),
+        (TRY_BRANCH_NAME, false) => (
+            BuildStatus::Failure,
+            LabelTrigger::TryBuildFailed,
+            Some(workflow_failed_comment(&workflows)),
+        ),
+        (AUTO_BRANCH_NAME, true) => (BuildStatus::Success, LabelTrigger::AutoBuildSucceeded, None),
+        (AUTO_BRANCH_NAME, false) => (
+            BuildStatus::Failure,
+            LabelTrigger::AutoBuildFailed,
+            Some(workflow_failed_comment(&workflows)),
+        ),
         _ => unreachable!("Branch should be bors observed branch"),
     };
+
     db.update_build_status(&build, status).await?;
-    handle_label_trigger(repo, pr.number, trigger).await?;
+    handle_label_trigger(repo, pr_num, trigger).await?;
+
+    if let Some(comment) = comment_opt {
+        repo.client.post_comment(pr_num, comment).await?;
+    }
 
     match branch {
-        TRY_BRANCH_NAME => {
-            complete_try_build(repo, pr, build, workflows, build_succeeded, payload).await?
-        }
+        TRY_BRANCH_NAME => complete_try_build(repo, build, build_succeeded).await?,
         AUTO_BRANCH_NAME => complete_auto_build(merge_queue_tx).await?,
         _ => unreachable!("Branch should be bors observed branch"),
     }
@@ -222,11 +248,8 @@ async fn try_complete_build(
 
 async fn complete_try_build(
     repo: &RepositoryState,
-    pr: PullRequestModel,
     build: BuildModel,
-    workflows: Vec<WorkflowModel>,
     build_succeeded: bool,
-    payload: CheckSuiteCompleted,
 ) -> anyhow::Result<()> {
     if let Some(check_run_id) = build.check_run_id {
         let (status, conclusion) = if build_succeeded {
@@ -243,15 +266,6 @@ async fn complete_try_build(
             tracing::error!("Could not update check run {check_run_id}: {error:?}");
         }
     }
-
-    let message = if build_succeeded {
-        tracing::info!("Workflow failed");
-        workflow_failed_comment(&workflows)
-    } else {
-        tracing::info!("Workflow succeeded");
-        try_build_succeeded_comment(&workflows, payload.commit_sha, &build)
-    };
-    repo.client.post_comment(pr.number, message).await?;
 
     Ok(())
 }
