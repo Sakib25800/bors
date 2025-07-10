@@ -14,9 +14,6 @@ use crate::bors::handlers::is_bors_observed_branch;
 use crate::bors::handlers::labels::handle_label_trigger;
 use crate::bors::merge_queue::AUTO_BRANCH_NAME;
 use crate::bors::merge_queue::MergeQueueSender;
-use crate::database::BuildModel;
-use crate::database::PullRequestModel;
-use crate::database::WorkflowModel;
 use crate::database::{BuildStatus, WorkflowStatus};
 use crate::github::LabelTrigger;
 
@@ -237,20 +234,6 @@ async fn try_complete_build(
         repo.client.post_comment(pr_num, comment).await?;
     }
 
-    match branch {
-        TRY_BRANCH_NAME => complete_try_build(repo, build, build_succeeded).await?,
-        AUTO_BRANCH_NAME => complete_auto_build(merge_queue_tx).await?,
-        _ => unreachable!("Branch should be bors observed branch"),
-    }
-
-    Ok(())
-}
-
-async fn complete_try_build(
-    repo: &RepositoryState,
-    build: BuildModel,
-    build_succeeded: bool,
-) -> anyhow::Result<()> {
     if let Some(check_run_id) = build.check_run_id {
         let (status, conclusion) = if build_succeeded {
             (CheckRunStatus::Completed, Some(CheckRunConclusion::Success))
@@ -267,11 +250,10 @@ async fn complete_try_build(
         }
     }
 
-    Ok(())
-}
-
-async fn complete_auto_build(merge_queue_tx: &MergeQueueSender) -> anyhow::Result<()> {
-    merge_queue_tx.trigger().await?;
+    // Trigger merge queue when an auto build completes
+    if branch == AUTO_BRANCH_NAME {
+        merge_queue_tx.trigger().await?;
+    }
 
     Ok(())
 }
