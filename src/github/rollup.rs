@@ -463,10 +463,8 @@ async fn has_pending_auto_build_conflict(
     pending_auto_build: &BuildModel,
     pending_auto_pr_number: PullRequestNumber,
 ) -> Result<bool, RollupError> {
-    let merge_message = format!(
-        "Rollup compatibility check against pending auto build #{}",
-        pending_auto_pr_number
-    );
+    let merge_message =
+        format!("Rollup compatibility check against pending auto build #{pending_auto_pr_number}");
     // Merge the pending auto build's commit into the rollup branch
     match client
         .merge_branches(
